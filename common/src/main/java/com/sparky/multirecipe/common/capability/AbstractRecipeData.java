@@ -1,0 +1,331 @@
+/*
+ * Copyright (C) 2020-2023 Sparky
+ *
+ * MultiRecipe is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * any later version.
+ *
+ * MultiRecipe is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with MultiRecipe.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package com.sparky.multirecipe.common.capability;
+
+import com.mojang.datafixers.util.Pair;
+import com.sparky.multirecipe.PolymorphConstants;
+import com.sparky.multirecipe.api.PolymorphApi;
+import com.sparky.multirecipe.api.common.base.IRecipePair;
+import com.sparky.multirecipe.api.common.capability.IRecipeData;
+import com.sparky.multirecipe.common.impl.RecipePair;
+import net.minecraft.core.NonNullList;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.Container;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.crafting.CustomRecipe;
+import net.minecraft.world.item.crafting.Recipe;
+import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.item.crafting.RecipeType;
+import net.minecraft.world.level.Level;
+
+import javax.annotation.Nonnull;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicReference;
+
+public abstract class AbstractRecipeData<E> implements IRecipeData<E> {
+
+    private final SortedSet<IRecipePair> recipesList;
+    private final E owner;
+
+    private RecipeHolder<?> lastRecipe;
+    private RecipeHolder<?> selectedRecipe;
+    private ResourceLocation loadedRecipe;
+    private boolean isFailing;
+
+    private NonNullList<Item> input;
+
+    public AbstractRecipeData(E owner) {
+        this.recipesList = new TreeSet<>();
+        this.owner = owner;
+        this.input = NonNullList.create();
+    }
+
+
+    @Override
+    public <T extends Recipe<C>, C extends Container> Optional<RecipeHolder<T>> getRecipe(RecipeType<T> type,
+                                                                                          C inventory, Level level,
+                                                                                          List<RecipeHolder<T>> recipesList) {
+        boolean isEmpty = this.isEmpty(inventory);
+        this.getLoadedRecipe().flatMap(id -> level.getRecipeManager().byKey(id))
+                .ifPresent(selected -> {
+                    try {
+                        if (selected.value().getType() == type &&
+                                (((T) selected.value()).matches(inventory, level) || isEmpty)) {
+                            this.setSelectedRecipe(selected);
+                        }
+                    } catch (ClassCastException e) {
+                        PolymorphConstants.LOG.error("Recipe {} does not match inventory {}",
+                                selected.id(), inventory);
+                    }
+                    this.loadedRecipe = null;
+                });
+
+        if (isEmpty) {
+            this.setFailing(false);
+            this.sendRecipesListToListeners(true);
+            return Optional.empty();
+        }
+        AtomicReference<RecipeHolder<T>> ref = new AtomicReference<>(null);
+        this.getLastRecipe().ifPresent(recipe -> {
+            try {
+                if (recipe.value().getType() == type && ((RecipeHolder<T>) recipe).value().matches(inventory, level)) {
+                    this.getSelectedRecipe().ifPresent(selected -> {
+                        try {
+                            if (selected.value().getType() == type && ((RecipeHolder<T>) selected).value().matches(inventory, level)) {
+                                ref.set((RecipeHolder<T>) selected);
+                            }
+                        } catch (ClassCastException e) {
+                            PolymorphConstants.LOG.error("Recipe {} does not match inventory {}",
+                                    selected.id(), inventory);
+                        }
+                    });
+                }
+            } catch (ClassCastException e) {
+                PolymorphConstants.LOG.error("Recipe {} does not match inventory {}", recipe.id(),
+                        inventory);
+            }
+        });
+        RecipeHolder<T> result = ref.get();
+
+        if (result != null && !(this instanceof AbstractBlockEntityRecipeData)) {
+            boolean inputChanged = false;
+            int size = inventory.getContainerSize();
+            NonNullList<Item> currentInput = NonNullList.withSize(size, Items.AIR);
+
+            if (size != this.input.size()) {
+                inputChanged = true;
+            }
+
+            for (int i = 0; i < size; i++) {
+                ItemStack stack = inventory.getItem(i);
+                Item item = stack.getItem();
+
+                if (!inputChanged && i < this.input.size() && item != this.input.get(i)) {
+                    inputChanged = true;
+                }
+
+                if (!stack.isEmpty()) {
+                    currentInput.set(i, item);
+                }
+            }
+            this.input = currentInput;
+
+            if (!inputChanged) {
+                this.setFailing(false);
+                this.sendRecipesListToListeners(false);
+                return Optional.of(result);
+            }
+        }
+        SortedSet<IRecipePair> newDataset = new TreeSet<>();
+        List<RecipeHolder<T>> recipes =
+                recipesList.isEmpty() ? level.getRecipeManager().getRecipesFor(type, inventory, level) :
+                        recipesList;
+
+        if (recipes.isEmpty()) {
+            this.setFailing(true);
+            this.sendRecipesListToListeners(true);
+            return Optional.empty();
+        }
+        List<RecipeHolder<T>> validRecipes = new ArrayList<>();
+
+        for (var entry : recipes) {
+            ResourceLocation id = entry.id();
+
+            if (ref.get() == null &&
+                    this.getSelectedRecipe().map(recipe -> recipe.id().equals(id)).orElse(false)) {
+                ref.set(entry);
+            }
+            ItemStack output = entry.value().getResultItem(level.registryAccess());
+
+            // noinspection ConstantConditions
+            if (output == null || output.isEmpty() || entry.value() instanceof CustomRecipe) {
+                output = entry.value().assemble(inventory, level.registryAccess());
+            }
+
+            if (output.isEmpty()) {
+                continue;
+            }
+            newDataset.add(new RecipePair(id, output));
+            validRecipes.add(entry);
+        }
+
+        if (validRecipes.isEmpty()) {
+            this.setFailing(true);
+            this.sendRecipesListToListeners(true);
+            return Optional.empty();
+        }
+        this.setRecipesList(newDataset);
+        result = ref.get();
+
+        if (result == null) {
+            ResourceLocation rl = newDataset.first().getResourceLocation();
+
+            for (var recipe : validRecipes) {
+
+                if (recipe.id().equals(rl)) {
+                    result = recipe;
+                    break;
+                }
+            }
+        }
+
+        if (result == null) {
+            this.setFailing(true);
+            this.sendRecipesListToListeners(true);
+            return Optional.empty();
+        }
+        this.lastRecipe = result;
+        this.setSelectedRecipe(result);
+        this.setFailing(false);
+        this.sendRecipesListToListeners(false);
+        return Optional.of(result);
+    }
+
+    @Override
+    public Optional<? extends RecipeHolder<?>> getSelectedRecipe() {
+        return Optional.ofNullable(this.selectedRecipe);
+    }
+
+    @Override
+    public void setSelectedRecipe(@Nonnull RecipeHolder<?> recipe) {
+        this.selectedRecipe = recipe;
+    }
+
+    public Optional<? extends RecipeHolder<?>> getLastRecipe() {
+        return Optional.ofNullable(this.lastRecipe);
+    }
+
+    public Optional<ResourceLocation> getLoadedRecipe() {
+        return Optional.ofNullable(this.loadedRecipe);
+    }
+
+    @Nonnull
+    @Override
+    public SortedSet<IRecipePair> getRecipesList() {
+        return this.recipesList;
+    }
+
+    @Override
+    public void setRecipesList(@Nonnull SortedSet<IRecipePair> recipesList) {
+        this.recipesList.clear();
+        this.recipesList.addAll(recipesList);
+    }
+
+    @Override
+    public boolean isEmpty(Container inventory) {
+
+        if (inventory != null) {
+
+            for (int i = 0; i < inventory.getContainerSize(); i++) {
+
+                if (!inventory.getItem(i).isEmpty()) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public E getOwner() {
+        return this.owner;
+    }
+
+    @Override
+    public void selectRecipe(@Nonnull RecipeHolder<?> recipe) {
+        this.setSelectedRecipe(recipe);
+    }
+
+    @Override
+    public abstract Set<ServerPlayer> getListeners();
+
+    @Override
+    public void sendRecipesListToListeners(boolean isEmpty) {
+        Pair<SortedSet<IRecipePair>, ResourceLocation> packetData =
+                isEmpty ? new Pair<>(new TreeSet<>(), null) : this.getPacketData();
+
+        for (ServerPlayer listener : this.getListeners()) {
+            PolymorphApi.common().getPacketDistributor()
+                    .sendRecipesListS2C(listener, packetData.getFirst(), packetData.getSecond());
+        }
+    }
+
+    @Override
+    public Pair<SortedSet<IRecipePair>, ResourceLocation> getPacketData() {
+        return new Pair<>(this.getRecipesList(), null);
+    }
+
+    @Override
+    public boolean isFailing() {
+        return this.isFailing;
+    }
+
+    @Override
+    public void setFailing(boolean isFailing) {
+        this.isFailing = isFailing;
+    }
+
+    @Override
+    public void readNBT(CompoundTag compoundTag) {
+
+        if (compoundTag.contains("SelectedRecipe")) {
+            this.loadedRecipe = new ResourceLocation(compoundTag.getString("SelectedRecipe"));
+        }
+
+        if (compoundTag.contains("RecipeDataSet")) {
+            Set<IRecipePair> dataset = this.getRecipesList();
+            dataset.clear();
+            ListTag list = compoundTag.getList("RecipeDataSet", Tag.TAG_COMPOUND);
+
+            for (Tag inbt : list) {
+                CompoundTag tag = (CompoundTag) inbt;
+                ResourceLocation id = ResourceLocation.tryParse(tag.getString("Id"));
+                ItemStack stack = ItemStack.of(tag.getCompound("ItemStack"));
+                dataset.add(new RecipePair(id, stack));
+            }
+        }
+    }
+
+    @Nonnull
+    @Override
+    public CompoundTag writeNBT() {
+        CompoundTag nbt = new CompoundTag();
+        this.getSelectedRecipe().ifPresent(
+                selected -> nbt.putString("SelectedRecipe", this.selectedRecipe.id().toString()));
+        Set<IRecipePair> dataset = this.getRecipesList();
+
+        if (!dataset.isEmpty()) {
+            ListTag list = new ListTag();
+
+            for (IRecipePair data : dataset) {
+                CompoundTag tag = new CompoundTag();
+                tag.put("ItemStack", data.getOutput().save(new CompoundTag()));
+                tag.putString("Id", data.getResourceLocation().toString());
+                list.add(tag);
+            }
+            nbt.put("RecipeDataSet", list);
+        }
+        return nbt;
+    }
+}

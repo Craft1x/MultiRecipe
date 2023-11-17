@@ -1,0 +1,13 @@
+{
+  "required": false,
+  "package": "com.sparky.multirecipe.mixin.integration",
+  "compatibilityLevel": "JAVA_16",
+  "refmap": "multirecipe.refmap.json",
+  "mixins": [
+
+  ],
+  "minVersion": "0.8",
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
