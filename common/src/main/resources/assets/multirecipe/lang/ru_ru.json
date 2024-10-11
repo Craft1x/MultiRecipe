@@ -1,0 +1,4 @@
+{
+  "commands.multirecipe.conflicts.starting": "Поиск по конфликтам рецептам...",
+  "commands.multirecipe.conflicts.success": "Найдены %d возможные конфликты. Проверьте журналы/conflicts.log для больше деталей."
+}

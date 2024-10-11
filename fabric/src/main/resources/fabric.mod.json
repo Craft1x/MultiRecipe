@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "${mod_id}",
+  "version": "${version}",
+  "name": "${mod_name}",
+  "description": "${mod_description}",
+  "authors": [
+    "${mod_author}"
+  ],
+  "contact": {
+    "issues": "${issue_tracker}"
+  },
+  "license": "${license}",
+  "icon": "${mod_id}_icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.sparky.multirecipe.PolymorphFabricMod"
+    ],
+    "client": [
+      "com.sparky.multirecipe.PolymorphFabricClientMod"
+    ],
+    "cardinal-components": [
+      "com.sparky.multirecipe.common.components.PolymorphFabricComponents"
+    ]
+  },
+  "custom": {
+    "cardinal-components": [
+      "multirecipe:player_recipe_data",
+      "multirecipe:block_entity_recipe_data",
+      "multirecipe:stack_recipe_data"
+    ]
+  },
+  "mixins": [
+    "multirecipe.mixins.json",
+    "multirecipe.fabric.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.14.23",
+    "fabric": "*",
+    "minecraft": "${fabric_mc_version_range}",
+    "java": ">=17"
+  }
+}
